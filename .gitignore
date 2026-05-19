@@ -1,0 +1,38 @@
+# Suno 전용 Chrome 프로필 (로그인 세션/쿠키 포함 — 절대 커밋 금지)
+chrome_suno_profile/
+
+# 생성된 mp3 결과물
+mp3/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# 환경변수/시크릿
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# 로그
+*.log
