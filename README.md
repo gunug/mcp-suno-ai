@@ -20,13 +20,23 @@ python -m playwright install chromium
 
 ## Claude Code에 MCP 등록
 
-프로젝트 루트(또는 워크스페이스)에서:
+### 방법 1: `claude mcp add` 명령 (권장)
+
+PowerShell에서는 백슬래시가 이스케이프 처리되어 사라질 수 있으므로 **경로를 따옴표로 감싸고 백슬래시를 두 번** 써야 합니다.
 
 ```powershell
-claude mcp add suno-ai python c:\onethelab\project\mcp_suno_ai\server.py
+claude mcp add suno-ai python "c:\\onethelab\\project\\mcp_suno_ai\\server.py"
 ```
 
-또는 수동으로 `~/.claude.json` 등에 stdio 서버로 등록:
+기본 스코프는 `local`(현재 프로젝트 전용). 다른 스코프가 필요하면 `--scope user`(전역) 또는 `--scope project`(`.mcp.json` 공유) 옵션을 추가:
+
+```powershell
+claude mcp add suno-ai --scope user python "c:\\onethelab\\project\\mcp_suno_ai\\server.py"
+```
+
+### 방법 2: 수동으로 `~/.claude.json` 편집
+
+`C:\Users\<사용자>\.claude.json`을 열어 stdio 서버로 등록:
 
 ```json
 {
@@ -39,7 +49,30 @@ claude mcp add suno-ai python c:\onethelab\project\mcp_suno_ai\server.py
 }
 ```
 
-등록 후 Claude Code 재시작.
+### 등록 확인
+
+```powershell
+claude mcp list
+```
+
+다음과 같이 `✓ Connected`로 표시되면 정상:
+
+```
+suno-ai: python c:\onethelab\project\mcp_suno_ai\server.py - ✓ Connected
+```
+
+등록 후 Claude Code 재시작. Claude Code 안에서는 `mcp__suno-ai__create_song` 도구로 호출됩니다.
+
+### 등록 제거
+
+```powershell
+claude mcp remove suno-ai
+```
+
+### 트러블슈팅 (등록 단계)
+
+- **경로에서 백슬래시가 사라짐** (`python c:onethelabprojectmcp_suno_aiserver.py` 로 등록됨) — PowerShell이 백슬래시를 잘못 해석한 경우. `claude mcp remove suno-ai`로 제거 후 위 권장 형식(따옴표 + `\\`)으로 재등록.
+- **`✗ Failed to connect`** — `python`이 PATH에 없거나 `requirements.txt`의 패키지(`mcp`, `playwright` 등)가 설치되지 않은 경우. 설치 단계를 다시 확인.
 
 ## 사용 예 (Claude Code 안에서)
 
