@@ -2,8 +2,10 @@
 
 기존 91_make_mp3/suno_create.py의 검증된 셀렉터/대기 로직을 MCP 호출용으로 정리.
 - 입력: lyrics, styles, title (직접 인자)
-- 출력: 다운로드된 mp3 파일 경로 리스트
+- 저장 위치: 호출 시점의 CWD 하단 ./mp3/
+- 출력: 다운로드된 mp3 파일 경로 리스트 (CWD 기준 상대 경로, 예: "mp3/곡제목.mp3")
 - 로그인 미감지 시 브라우저를 띄워둔 채 사용자 로그인 대기 (최대 5분)
+- Chrome 프로필(PROFILE_DIR)은 스크립트 위치 기준 — 세션 영속성 보장
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from playwright.sync_api import sync_playwright, Page
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.join(BASE_DIR, "chrome_suno_profile")
-MP3_DIR = os.path.join(BASE_DIR, "mp3")
+# MP3 저장 디렉터리는 호출 시점 CWD 기준 — generate_songs() 안에서 동적으로 계산
 SUNO_CREATE_URL = "https://suno.com/create"
 SUNO_HOME_URL = "https://suno.com"
 
@@ -368,13 +370,19 @@ def _resolve_filename(used: set[str], title_from_ui: str | None, fallback_title:
 # ---------- 엔트리포인트 ----------
 
 def generate_songs(lyrics: str, styles: str, title: str = "") -> GenerateResult:
-    """Suno에 곡 2개를 생성하고 ./mp3/에 다운로드."""
+    """Suno에 곡 2개를 생성하고 ./mp3/에 다운로드.
+
+    저장 위치: 호출 시점의 CWD 하단 ./mp3/
+    반환 경로: CWD 기준 상대 경로 ("mp3/곡제목.mp3" 형식)
+    """
     if not lyrics.strip():
         raise SunoError("lyrics가 비어 있습니다.")
     if not styles.strip():
         raise SunoError("styles가 비어 있습니다.")
 
-    os.makedirs(MP3_DIR, exist_ok=True)
+    cwd = os.getcwd()
+    mp3_dir = os.path.join(cwd, "mp3")
+    os.makedirs(mp3_dir, exist_ok=True)
     os.makedirs(PROFILE_DIR, exist_ok=True)
 
     with sync_playwright() as p:
@@ -423,11 +431,12 @@ def generate_songs(lyrics: str, styles: str, title: str = "") -> GenerateResult:
                 durations[sid] = expected_sec
 
                 filename = _resolve_filename(used_names, ui_title, title, sid)
-                target = os.path.join(MP3_DIR, filename)
+                target = os.path.join(mp3_dir, filename)
 
                 ok = _download_song(page, sid, target, expected_sec)
                 if ok and os.path.exists(target):
-                    files.append(target)
+                    rel_path = os.path.relpath(target, cwd).replace(os.sep, "/")
+                    files.append(rel_path)
 
             if not files:
                 raise SunoError(

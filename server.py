@@ -1,7 +1,7 @@
 """Suno AI MCP 서버.
 
 Claude Code 등 MCP 클라이언트에서 호출 가능한 도구:
-    create_song(lyrics, styles, title?) → 곡 2개 생성 후 ./mp3/에 저장
+    create_song(lyrics, styles, title?) → 곡 2개 생성 후 호출 측 CWD/mp3/ 에 저장
 
 브라우저 자동화는 별도 스레드에서 실행 (sync_playwright 호환).
 """
@@ -22,11 +22,12 @@ async def create_song(lyrics: str, styles: str, title: str = "") -> dict:
     """Suno AI Advanced 모드로 곡 2개를 생성하고 mp3로 다운로드한다.
 
     동작:
-    - 전용 Chrome 프로필(./chrome_suno_profile)로 브라우저를 띄움
+    - 전용 Chrome 프로필(스크립트 위치/chrome_suno_profile)로 브라우저를 띄움
     - 로그인 미감지 시 창을 열어둔 채 사용자 로그인 대기 (최대 5분)
     - https://suno.com/create → Advanced → Lyrics/Styles/Title 입력 → Create
     - 곡 카드의 duration 표시로 렌더링 완료를 감지 (최대 5분)
-    - ./mp3/ 폴더에 mp3 다운로드 (파일명: Suno 곡 제목)
+    - 호출 측 CWD/mp3/ 폴더에 mp3 다운로드 (파일명: Suno 곡 제목)
+    - 반환 경로는 CWD 기준 상대 경로 ("mp3/곡제목.mp3")
 
     Args:
         lyrics: 가사 (필수)
