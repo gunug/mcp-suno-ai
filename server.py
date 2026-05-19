@@ -22,6 +22,7 @@ async def create_song(lyrics: str, styles: str, title: str = "") -> dict:
     """Suno AI Advanced 모드로 곡 2개를 생성하고 mp3로 다운로드한다.
 
     동작:
+    - 호출 측 CWD/prompt/YYYYMMDD_HHMMSS_<title>.md 에 입력 프롬프트 기록
     - 전용 Chrome 프로필(스크립트 위치/chrome_suno_profile)로 브라우저를 띄움
     - 로그인 미감지 시 창을 열어둔 채 사용자 로그인 대기 (최대 5분)
     - https://suno.com/create → Advanced → Lyrics/Styles/Title 입력 → Create

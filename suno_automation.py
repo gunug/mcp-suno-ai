@@ -4,22 +4,24 @@
 - 입력: lyrics, styles, title (직접 인자)
 - 저장 위치: 호출 시점의 CWD 하단 ./mp3/
 - 출력: 다운로드된 mp3 파일 경로 리스트 (CWD 기준 상대 경로, 예: "mp3/곡제목.mp3")
+- 입력 기록: 생성 직전 ./prompt/YYYYMMDD_HHMMSS_<title>.md 작성
 - 로그인 미감지 시 브라우저를 띄워둔 채 사용자 로그인 대기 (최대 5분)
 - Chrome 프로필(PROFILE_DIR)은 스크립트 위치 기준 — 세션 영속성 보장
 """
 
 from __future__ import annotations
 
-import os
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 
 from mutagen.mp3 import MP3
 from playwright.sync_api import sync_playwright, Page
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROFILE_DIR = os.path.join(BASE_DIR, "chrome_suno_profile")
+BASE_DIR = Path(__file__).resolve().parent
+PROFILE_DIR = BASE_DIR / "chrome_suno_profile"
 # MP3 저장 디렉터리는 호출 시점 CWD 기준 — generate_songs() 안에서 동적으로 계산
 SUNO_CREATE_URL = "https://suno.com/create"
 SUNO_HOME_URL = "https://suno.com"
@@ -70,6 +72,20 @@ def _mp3_duration(path: str) -> float:
         return MP3(path).info.length
     except Exception:
         return 0.0
+
+
+def _write_prompt_log(prompt_dir: Path, lyrics: str, styles: str, title: str) -> Path:
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = _sanitize_filename(title) if title.strip() else "untitled"
+    md_path = prompt_dir / f"{ts}_{name}.md"
+    content = (
+        f"## Title\n{title}\n\n"
+        f"## Style of Music\n{styles}\n\n"
+        f"## Lyrics\n{lyrics}\n"
+    )
+    md_path.write_text(content, encoding="utf-8")
+    return md_path
 
 
 # ---------- 로그인 ----------
@@ -348,7 +364,8 @@ def _download_song(page: Page, song_id: str, target_path: str, expected_sec: flo
         if attempt < 2:
             time.sleep(20)
 
-    return os.path.exists(target_path) and os.path.getsize(target_path) > 10_000
+    p = Path(target_path)
+    return p.exists() and p.stat().st_size > 10_000
 
 
 def _resolve_filename(used: set[str], title_from_ui: str | None, fallback_title: str, song_id: str) -> str:
@@ -374,20 +391,24 @@ def generate_songs(lyrics: str, styles: str, title: str = "") -> GenerateResult:
 
     저장 위치: 호출 시점의 CWD 하단 ./mp3/
     반환 경로: CWD 기준 상대 경로 ("mp3/곡제목.mp3" 형식)
+
+    생성 직전 ./prompt/YYYYMMDD_HHMMSS_<title>.md 에 입력 프롬프트(Title/Style/Lyrics)를 기록.
     """
     if not lyrics.strip():
         raise SunoError("lyrics가 비어 있습니다.")
     if not styles.strip():
         raise SunoError("styles가 비어 있습니다.")
 
-    cwd = os.getcwd()
-    mp3_dir = os.path.join(cwd, "mp3")
-    os.makedirs(mp3_dir, exist_ok=True)
-    os.makedirs(PROFILE_DIR, exist_ok=True)
+    cwd = Path.cwd()
+    mp3_dir = cwd / "mp3"
+    mp3_dir.mkdir(parents=True, exist_ok=True)
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+
+    _write_prompt_log(cwd / "prompt", lyrics, styles, title)
 
     with sync_playwright() as p:
         browser = p.chromium.launch_persistent_context(
-            user_data_dir=PROFILE_DIR,
+            user_data_dir=str(PROFILE_DIR),
             headless=False,
             args=["--disable-blink-features=AutomationControlled"],
         )
@@ -431,11 +452,11 @@ def generate_songs(lyrics: str, styles: str, title: str = "") -> GenerateResult:
                 durations[sid] = expected_sec
 
                 filename = _resolve_filename(used_names, ui_title, title, sid)
-                target = os.path.join(mp3_dir, filename)
+                target = mp3_dir / filename
 
-                ok = _download_song(page, sid, target, expected_sec)
-                if ok and os.path.exists(target):
-                    rel_path = os.path.relpath(target, cwd).replace(os.sep, "/")
+                ok = _download_song(page, sid, str(target), expected_sec)
+                if ok and target.exists():
+                    rel_path = target.relative_to(cwd).as_posix()
                     files.append(rel_path)
 
             if not files:
