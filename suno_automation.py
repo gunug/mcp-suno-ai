@@ -384,6 +384,115 @@ def _resolve_filename(used: set[str], title_from_ui: str | None, fallback_title:
         i += 1
 
 
+# ---------- Simple 모드 전용 ----------
+
+def _write_prompt_log_simple(prompt_dir: Path, description: str, title: str, instrumental: bool) -> Path:
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = _sanitize_filename(title) if title.strip() else "untitled"
+    md_path = prompt_dir / f"{ts}_{name}_simple.md"
+    content = (
+        f"## Title\n{title}\n\n"
+        f"## Instrumental\n{'Yes' if instrumental else 'No'}\n\n"
+        f"## Description\n{description}\n"
+    )
+    md_path.write_text(content, encoding="utf-8")
+    return md_path
+
+
+def _first_visible(page: Page, selectors: list[str]):
+    """셀렉터 목록을 순서대로 시도해 첫 번째 visible 요소를 반환."""
+    for sel in selectors:
+        el = page.query_selector(sel)
+        if el and el.is_visible():
+            return el
+    return None
+
+
+def _fill_form_simple_and_submit(page: Page, description: str, title: str, instrumental: bool) -> None:
+    page.goto(SUNO_CREATE_URL, wait_until="domcontentloaded", timeout=60_000)
+    page.wait_for_timeout(2_000)
+
+    # 오버레이 닫기
+    overlay = page.query_selector('div[class*="overlay"], div[class*="modal"]')
+    if overlay and overlay.is_visible():
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(800)
+
+    # 혹시 Custom/Advanced 모드로 남아 있으면 Simple/Description으로 복귀
+    # (visible 체크 필수 — hidden DOM 요소 클릭 방지)
+    mode_btn = _first_visible(page, [
+        'button:has-text("Simple")',
+        'button:has-text("Description")',
+    ])
+    if mode_btn:
+        mode_btn.click()
+        page.wait_for_timeout(800)
+
+    page.wait_for_timeout(800)
+
+    # Description textarea: visible 요소만 사용
+    desc_area = _first_visible(page, [
+        'textarea[placeholder*="Describe" i]',
+        'textarea[placeholder*="An Indie" i]',
+        'textarea[placeholder*="description" i]',
+        'textarea[placeholder*="song" i]',
+    ])
+    if not desc_area:
+        for el in page.query_selector_all('textarea'):
+            if el.is_visible():
+                desc_area = el
+                break
+    if not desc_area:
+        raise SunoError("Simple 모드에서 Description 입력 필드를 찾지 못했습니다.")
+
+    _paste_into(page, desc_area, description)
+
+    # Instrumental 토글 (요청 시, visible 체크)
+    if instrumental:
+        instr_btn = _first_visible(page, [
+            'button:has-text("Instrumental")',
+            'label:has-text("Instrumental")',
+            '[data-testid*="instrumental" i]',
+        ])
+        if instr_btn:
+            instr_btn.click()
+            page.wait_for_timeout(500)
+
+    # Title 입력 (선택)
+    if title:
+        page.evaluate(
+            """
+            (title) => {
+                const inputs = document.querySelectorAll(
+                    'input[placeholder="Song Title (Optional)"]'
+                );
+                for (const inp of inputs) {
+                    if (window.getComputedStyle(inp).visibility === 'visible') {
+                        const setter = Object.getOwnPropertyDescriptor(
+                            window.HTMLInputElement.prototype, 'value'
+                        ).set;
+                        setter.call(inp, title);
+                        inp.dispatchEvent(new Event('input', { bubbles: true }));
+                        inp.dispatchEvent(new Event('change', { bubbles: true }));
+                        return;
+                    }
+                }
+            }
+            """,
+            title,
+        )
+
+    page.wait_for_timeout(800)
+
+    create_btn = page.query_selector('button:has-text("Create")')
+    if not create_btn:
+        raise SunoError("Create 버튼을 찾지 못했습니다.")
+    if create_btn.is_disabled():
+        raise SunoError("Create 버튼이 비활성 상태입니다. 입력값을 확인하세요.")
+    create_btn.click()
+
+
 # ---------- 엔트리포인트 ----------
 
 def generate_songs(lyrics: str, styles: str, title: str = "") -> GenerateResult:
@@ -431,6 +540,86 @@ def generate_songs(lyrics: str, styles: str, title: str = "") -> GenerateResult:
                 raise SunoError("새로 생성된 곡 ID가 감지되지 않았습니다.")
 
             # 새 곡은 보통 2개; 더 많거나 적게 잡혀도 그대로 진행
+            new_ids = new_ids[:2]
+
+            # Phase 2: UI 렌더링 완료 대기 (duration 표시 & spinner 없음)
+            status = _wait_until_rendered(page, new_ids, timeout_sec=GENERATION_TIMEOUT_SEC)
+            details = status.get("details", {})
+
+            # CDN 안정화 대기
+            page.wait_for_timeout(15_000)
+
+            durations: dict[str, float] = {}
+            files: list[str] = []
+            used_names: set[str] = set()
+
+            for sid in new_ids:
+                info = details.get(sid, {})
+                dur_str = info.get("duration")
+                ui_title = info.get("title")
+                expected_sec = float(_parse_duration_str(dur_str)) if dur_str else 0.0
+                durations[sid] = expected_sec
+
+                filename = _resolve_filename(used_names, ui_title, title, sid)
+                target = mp3_dir / filename
+
+                ok = _download_song(page, sid, str(target), expected_sec)
+                if ok and target.exists():
+                    rel_path = target.relative_to(cwd).as_posix()
+                    files.append(rel_path)
+
+            if not files:
+                raise SunoError(
+                    f"곡 생성은 감지되었으나 다운로드에 실패했습니다 (song_ids={new_ids})."
+                )
+
+            return GenerateResult(files=files, song_ids=new_ids, durations=durations)
+        finally:
+            browser.close()
+
+
+def generate_songs_simple(description: str, title: str = "", instrumental: bool = False) -> GenerateResult:
+    """Suno Simple 모드로 곡 2개를 생성하고 ./mp3/에 다운로드.
+
+    저장 위치: 호출 시점의 CWD 하단 ./mp3/
+    반환 경로: CWD 기준 상대 경로 ("mp3/곡제목.mp3" 형식)
+
+    생성 직전 ./prompt/YYYYMMDD_HHMMSS_<title>_simple.md 에 입력 프롬프트를 기록.
+    """
+    if not description.strip():
+        raise SunoError("description이 비어 있습니다.")
+
+    cwd = Path.cwd()
+    mp3_dir = cwd / "mp3"
+    mp3_dir.mkdir(parents=True, exist_ok=True)
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+
+    _write_prompt_log_simple(cwd / "prompt", description, title, instrumental)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch_persistent_context(
+            user_data_dir=str(PROFILE_DIR),
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        page = browser.pages[0] if browser.pages else browser.new_page()
+
+        try:
+            if not _ensure_logged_in(page):
+                raise SunoError("Suno 로그인이 감지되지 않았습니다 (5분 대기 초과).")
+
+            before = _existing_song_ids(page) if page.url.startswith("https://suno.com") else set()
+            page.goto(SUNO_CREATE_URL, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_timeout(2_000)
+            before |= _existing_song_ids(page)
+
+            _fill_form_simple_and_submit(page, description, title, instrumental)
+
+            # Phase 1: 새 song ID 출현 (최대 90초)
+            new_ids = _wait_new_song_ids(page, before, timeout_sec=90)
+            if not new_ids:
+                raise SunoError("새로 생성된 곡 ID가 감지되지 않았습니다.")
+
             new_ids = new_ids[:2]
 
             # Phase 2: UI 렌더링 완료 대기 (duration 표시 & spinner 없음)

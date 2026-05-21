@@ -12,7 +12,7 @@ import asyncio
 
 from mcp.server.fastmcp import FastMCP
 
-from suno_automation import GenerateResult, SunoError, generate_songs
+from suno_automation import GenerateResult, SunoError, generate_songs, generate_songs_simple
 
 mcp = FastMCP("suno-ai")
 
@@ -42,6 +42,46 @@ async def create_song(lyrics: str, styles: str, title: str = "") -> dict:
     try:
         result: GenerateResult = await asyncio.to_thread(
             generate_songs, lyrics, styles, title
+        )
+        return {
+            "status": "success",
+            "files": result.files,
+            "song_ids": result.song_ids,
+            "durations": result.durations,
+            "message": f"{len(result.files)}곡 다운로드 완료.",
+        }
+    except SunoError as e:
+        return {"status": "error", "message": str(e)}
+    except Exception as e:
+        return {"status": "error", "message": f"예상치 못한 오류: {e!r}"}
+
+
+@mcp.tool()
+async def create_song_simple(description: str, title: str = "", instrumental: bool = False) -> dict:
+    """Suno AI Simple 모드로 곡 2개를 생성하고 mp3로 다운로드한다.
+
+    동작:
+    - 호출 측 CWD/prompt/YYYYMMDD_HHMMSS_<title>_simple.md 에 입력 프롬프트 기록
+    - 전용 Chrome 프로필(스크립트 위치/chrome_suno_profile)로 브라우저를 띄움
+    - 로그인 미감지 시 창을 열어둔 채 사용자 로그인 대기 (최대 5분)
+    - https://suno.com/create → Simple 모드 유지 → Description/Title 입력 → Create
+    - 곡 카드의 duration 표시로 렌더링 완료를 감지 (최대 5분)
+    - 호출 측 CWD/mp3/ 폴더에 mp3 다운로드 (파일명: Suno 곡 제목)
+    - 반환 경로는 CWD 기준 상대 경로 ("mp3/곡제목.mp3")
+
+    Args:
+        description: 원하는 곡의 분위기·장르·감정을 자연어로 설명 (필수)
+                     예: "upbeat jazz cafe background music with piano and saxophone"
+        title: 곡 제목 (선택, 빈 문자열이면 Suno가 자동 생성)
+        instrumental: True이면 가사 없는 연주곡으로 생성 (기본값 False)
+
+    Returns:
+        성공 시 {"status": "success", "files": [...], "song_ids": [...], "durations": {...}}
+        실패 시 {"status": "error", "message": "..."}
+    """
+    try:
+        result: GenerateResult = await asyncio.to_thread(
+            generate_songs_simple, description, title, instrumental
         )
         return {
             "status": "success",
