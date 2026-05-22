@@ -2,17 +2,40 @@
 
 Suno AI 곡 생성 자동화를 MCP(Model Context Protocol) 서버로 노출하여 Claude Code 등에서 호출 가능하게 만든 프로젝트.
 
-## 제공 도구
+## 제공 도구 (5개)
 
-- `create_song(lyrics, styles, title?)` — Suno Create 페이지에서 Advanced 모드로 곡 2개를 생성하고 **호출 측 CWD/mp3/** 폴더에 mp3로 다운로드.
+### 생성 + 다운로드 일괄
+
+| 도구 | 설명 |
+|------|------|
+| `create_song(lyrics, styles, title?)` | Advanced 모드 — 가사·스타일 입력, 생성부터 mp3 다운로드까지 한 번에 |
+| `create_song_simple(description, title?, instrumental?)` | Simple 모드 — 자연어 설명 한 줄로 생성부터 mp3 다운로드까지 한 번에 |
+
+### 생성 요청만 (빠른 반환)
+
+| 도구 | 설명 |
+|------|------|
+| `request_song(lyrics, styles, title?)` | Advanced 모드 — 폼 제출 후 song ID만 즉시 반환 (다운로드 없음) |
+| `request_song_simple(description, title?, instrumental?)` | Simple 모드 — 폼 제출 후 song ID만 즉시 반환 (다운로드 없음) |
+
+### 다운로드만
+
+| 도구 | 설명 |
+|------|------|
+| `download_songs(song_ids, title_hint?)` | song ID 목록을 받아 렌더링 완료 후 mp3 다운로드 |
+
+---
 
 ## 저장 위치 정책
 
 - **mp3 파일**: 호출 시점의 CWD(현재 작업 디렉터리) 하단 `./mp3/`. Claude Code가 어느 프로젝트에서 호출하느냐에 따라 그 프로젝트 안에 저장됨.
+- **프롬프트 로그**: 호출 시점 CWD 하단 `./prompt/`. 생성 직전 입력 내용을 `YYYYMMDD_HHMMSS_<title>.md` 형식으로 기록.
 - **Chrome 프로필**: 스크립트 위치(`<프로젝트경로>/chrome_suno_profile/`) 고정. CWD가 어디든 항상 같은 프로필을 사용 — 재로그인 불필요.
 - **반환 경로**: CWD 기준 상대 경로 (예: `"mp3/곡제목.mp3"`).
 
 > 본 README의 `<프로젝트경로>`는 본인이 clone 받은 디렉터리(예: `D:\projects\mcp-suno-ai`)로 치환해서 읽으세요.
+
+---
 
 ## 빠른 시작 — 다른 사용자가 clone 받았을 때
 
@@ -39,7 +62,7 @@ claude mcp list
 
 이후 호출부터는 자동 인증되며, mp3는 호출 시점 CWD 하단 `./mp3/`에 저장됩니다.
 
-별도 셋업이나 환경변수, 절대 경로 일치 같은 건 필요 없습니다. Chrome 로그인 세션과 다운로드된 mp3는 모두 `.gitignore` 처리되어 있어서 본인 계정으로 처음부터 시작합니다.
+---
 
 ## 설치 (상세)
 
@@ -52,6 +75,8 @@ python -m playwright install chromium
 ## 최초 1회 로그인
 
 전용 Chrome 프로필이 `<프로젝트경로>/chrome_suno_profile/`에 저장됩니다. 최초 호출 시 자동으로 브라우저 창이 열리고, 로그인되어 있지 않으면 그 창에서 직접 로그인하면 됩니다 (최대 5분 대기). 이후 호출부터는 자동 인증됩니다.
+
+---
 
 ## Claude Code에 MCP 등록
 
@@ -96,7 +121,7 @@ claude mcp list
 suno-ai: python <프로젝트경로>\server.py - ✓ Connected
 ```
 
-등록 후 Claude Code 재시작. Claude Code 안에서는 `mcp__suno-ai__create_song` 도구로 호출됩니다.
+등록 후 Claude Code 재시작.
 
 ### 등록 제거
 
@@ -106,19 +131,50 @@ claude mcp remove suno-ai
 
 ### 트러블슈팅 (등록 단계)
 
-- **경로에서 백슬래시가 사라짐** (예: `python conethelabprojectmcp_suno_aiserver.py` 로 등록됨) — PowerShell이 백슬래시를 잘못 해석한 경우. `claude mcp remove suno-ai`로 제거 후 위 권장 형식(따옴표 + `\\`)으로 재등록.
+- **경로에서 백슬래시가 사라짐** — PowerShell이 백슬래시를 잘못 해석한 경우. `claude mcp remove suno-ai`로 제거 후 위 권장 형식(따옴표 + `\\`)으로 재등록.
 - **`✗ Failed to connect`** — `python`이 PATH에 없거나 `requirements.txt`의 패키지(`mcp`, `playwright` 등)가 설치되지 않은 경우. 설치 단계를 다시 확인.
+
+---
 
 ## 사용 예 (Claude Code 안에서)
 
+### 일괄 방식 — Advanced 모드
+
 ```
-suno-ai의 create_song 도구를 호출해줘:
-- lyrics: "..."
+create_song 도구 호출:
+- lyrics: "[Verse]\n코드 한 줄 한 줄\n..."
 - styles: "Acoustic ballad, gentle, female vocal"
 - title: "Midnight Compile"
 ```
 
+### 일괄 방식 — Simple 모드
+
+```
+create_song_simple 도구 호출:
+- description: "upbeat jazz cafe background music with piano and saxophone"
+- title: "Cafe Jazz"
+- instrumental: true
+```
+
+### 분리 방식 — 요청 후 나중에 다운로드
+
+```
+# Step 1: 생성 요청 (빠르게 반환)
+request_song_simple 도구 호출:
+- description: "chill lo-fi hip hop, rainy night, nostalgic"
+
+# → song_ids: ["abc123", "def456"] 반환됨
+
+# Step 2: 렌더링 완료 후 다운로드
+download_songs 도구 호출:
+- song_ids: ["abc123", "def456"]
+```
+
+---
+
 ## 반환 형식
+
+### create_song / create_song_simple / download_songs
 
 ```json
 {
@@ -130,26 +186,52 @@ suno-ai의 create_song 도구를 호출해줘:
 }
 ```
 
+### request_song / request_song_simple
+
+```json
+{
+  "status": "success",
+  "song_ids": ["<id1>", "<id2>"],
+  "message": "생성 요청 완료. song_ids=[...]"
+}
+```
+
+실패 시 공통: `{"status": "error", "message": "..."}` 반환.
+
 `files`의 경로는 **호출 측 CWD 기준 상대 경로**. 실제 파일은 `<CWD>/mp3/...`에 저장됨.
 
-실패 시 `{"status": "error", "message": "..."}` 반환.
+---
 
 ## 동작 흐름
 
-1. Persistent Chromium 컨텍스트로 브라우저 열기 (`headless=False`, 봇 감지 우회 플래그)
+### 일괄 방식 (create_song / create_song_simple)
+
+1. Persistent Chromium 컨텍스트로 브라우저 열기 (`headless=False`, 봇 감지 우회)
 2. `https://suno.com` 접속 → 아바타 요소로 로그인 상태 확인
 3. 미로그인 시 사용자 로그인 대기 (최대 5분)
-4. `https://suno.com/create` 이동 → Advanced 클릭 → Lyrics Mode를 Manual로
-5. Lyrics, Styles, Title을 React 호환 방식으로 입력 (clipboard paste + native setter)
-6. Create 클릭 → 새 `/song/<id>` 링크 2개 출현 대기 (최대 90초)
-7. 곡 카드의 duration 텍스트(`X:XX`)와 spinner 부재로 렌더링 완료 감지 (최대 5분)
-8. CDN 안정화 15초 대기 후, 각 곡 페이지의 `audio_url` → `cdn1.suno.ai` → `audiopipe` 순으로 다운로드 시도
+4. `https://suno.com/create` 이동
+   - **Advanced**: Advanced 클릭 → Lyrics Mode를 Manual로 → Lyrics / Styles / Title 입력
+   - **Simple**: Simple 모드 유지 → Description / Title / Instrumental 입력
+5. Create 클릭 → 새 `/song/<id>` 링크 2개 출현 대기 (최대 90초)
+6. 곡 카드의 duration 텍스트(`X:XX`)와 spinner 부재로 렌더링 완료 감지 (최대 5분)
+7. CDN 안정화 15초 대기 후, `audio_url` → `cdn1.suno.ai` → `audiopipe` 순으로 다운로드
+
+### 분리 방식 (request_song* + download_songs)
+
+**request_song / request_song_simple**
+1~5번 동일, song ID 2개가 확인되면 **즉시 브라우저 종료 후 반환** (렌더링·다운로드 없음)
+
+**download_songs**
+1. 브라우저 열기 + 로그인 확인
+2. `https://suno.com/create` 이동 → 피드에서 해당 song ID의 duration 표시 대기 (최대 5분)
+3. CDN 안정화 15초 대기 후 다운로드
+
+---
 
 ## 폴더 구조
 
 ```
 <프로젝트경로>/                # MCP 서버 코드 (clone 받은 위치)
-├── goal.md                    # 요구사항
 ├── server.py                  # MCP 서버 엔트리
 ├── suno_automation.py         # Playwright 자동화 로직
 ├── requirements.txt
@@ -157,15 +239,17 @@ suno-ai의 create_song 도구를 호출해줘:
 └── chrome_suno_profile/       # (자동 생성, gitignored) Suno 전용 Chrome 프로필
 
 <호출 측 CWD>/                 # Claude Code가 실행 중인 디렉터리
-└── mp3/                       # (자동 생성, gitignored) 다운로드된 mp3
+├── mp3/                       # (자동 생성) 다운로드된 mp3
+└── prompt/                    # (자동 생성) 생성 요청 로그 (.md)
 ```
 
-> 참고: 예전에는 `mp3/`도 스크립트 위치 하단에 저장되었으나, 호출하는 프로젝트별로 결과물을 분리하기 위해 **CWD 기준**으로 변경되었습니다.
+---
 
 ## 트러블슈팅
 
-- `Create 버튼이 비활성 상태입니다` — Lyrics/Styles가 제대로 입력되지 않은 경우. UI 변경 가능성 있음.
+- `Create 버튼이 비활성 상태입니다` — Lyrics/Styles 또는 Description이 제대로 입력되지 않은 경우. UI 변경 가능성 있음.
 - `Suno 로그인이 감지되지 않았습니다` — 5분 안에 로그인 미완료. 브라우저 창에서 로그인 후 재시도.
 - `새로 생성된 곡 ID가 감지되지 않았습니다` — Suno 측 큐 적체 또는 계정 크레딧 부족.
-- 다운로드된 mp3가 짧게 잘림 — `cdn1.suno.ai`가 아직 준비 안 된 경우. 시간을 두고 재시도하거나 `audiopipe` 대체.
-- **mp3 파일이 예상한 위치에 없음** — Claude Code의 CWD를 확인하세요. 응답의 `files` 경로(예: `mp3/...`)는 CWD 기준 상대 경로이므로, `<현재 작업 디렉터리>/mp3/` 안에 저장됩니다. CWD를 모르겠다면 응답을 받기 전후로 Claude Code에서 `pwd` 또는 `Get-Location`을 실행해 확인 가능.
+- `Simple 모드에서 Description 입력 필드를 찾지 못했습니다` — Suno UI 변경으로 textarea 셀렉터가 달라진 경우. `suno_automation.py`의 `_fill_form_simple_and_submit` 안 셀렉터 목록을 수정.
+- 다운로드된 mp3가 짧게 잘림 — CDN이 아직 준비 안 된 경우. 시간을 두고 재시도하거나 `audiopipe` 대체.
+- **mp3 파일이 예상한 위치에 없음** — Claude Code의 CWD를 확인하세요. 응답의 `files` 경로는 CWD 기준 상대 경로이므로, `<현재 작업 디렉터리>/mp3/` 안에 저장됩니다. CWD를 모르겠다면 Claude Code에서 `Get-Location`을 실행해 확인.
