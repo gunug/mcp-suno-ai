@@ -493,6 +493,152 @@ def _fill_form_simple_and_submit(page: Page, description: str, title: str, instr
     create_btn.click()
 
 
+# ---------- 생성-only / 다운로드-only 분리 엔트리포인트 ----------
+
+def request_songs(lyrics: str, styles: str, title: str = "") -> list[str]:
+    """Advanced 모드로 생성 요청만 하고 song ID 목록을 반환 (다운로드 없음).
+
+    폼 제출 후 곡 카드에 song ID가 나타날 때까지만 대기 (최대 90초).
+    렌더링·다운로드는 하지 않으므로 빠르게 반환된다.
+    반환된 song ID는 download_songs_by_ids()에 넘겨 나중에 다운로드할 수 있다.
+    """
+    if not lyrics.strip():
+        raise SunoError("lyrics가 비어 있습니다.")
+    if not styles.strip():
+        raise SunoError("styles가 비어 있습니다.")
+
+    cwd = Path.cwd()
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    _write_prompt_log(cwd / "prompt", lyrics, styles, title)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch_persistent_context(
+            user_data_dir=str(PROFILE_DIR),
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        page = browser.pages[0] if browser.pages else browser.new_page()
+        try:
+            if not _ensure_logged_in(page):
+                raise SunoError("Suno 로그인이 감지되지 않았습니다 (5분 대기 초과).")
+
+            before = _existing_song_ids(page) if page.url.startswith("https://suno.com") else set()
+            page.goto(SUNO_CREATE_URL, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_timeout(2_000)
+            before |= _existing_song_ids(page)
+
+            _fill_form_and_submit(page, lyrics, styles, title)
+
+            new_ids = _wait_new_song_ids(page, before, timeout_sec=90)
+            if not new_ids:
+                raise SunoError("새로 생성된 곡 ID가 감지되지 않았습니다.")
+            return new_ids[:2]
+        finally:
+            browser.close()
+
+
+def request_songs_simple(description: str, title: str = "", instrumental: bool = False) -> list[str]:
+    """Simple 모드로 생성 요청만 하고 song ID 목록을 반환 (다운로드 없음).
+
+    폼 제출 후 곡 카드에 song ID가 나타날 때까지만 대기 (최대 90초).
+    반환된 song ID는 download_songs_by_ids()에 넘겨 나중에 다운로드할 수 있다.
+    """
+    if not description.strip():
+        raise SunoError("description이 비어 있습니다.")
+
+    cwd = Path.cwd()
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    _write_prompt_log_simple(cwd / "prompt", description, title, instrumental)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch_persistent_context(
+            user_data_dir=str(PROFILE_DIR),
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        page = browser.pages[0] if browser.pages else browser.new_page()
+        try:
+            if not _ensure_logged_in(page):
+                raise SunoError("Suno 로그인이 감지되지 않았습니다 (5분 대기 초과).")
+
+            before = _existing_song_ids(page) if page.url.startswith("https://suno.com") else set()
+            page.goto(SUNO_CREATE_URL, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_timeout(2_000)
+            before |= _existing_song_ids(page)
+
+            _fill_form_simple_and_submit(page, description, title, instrumental)
+
+            new_ids = _wait_new_song_ids(page, before, timeout_sec=90)
+            if not new_ids:
+                raise SunoError("새로 생성된 곡 ID가 감지되지 않았습니다.")
+            return new_ids[:2]
+        finally:
+            browser.close()
+
+
+def download_songs_by_ids(song_ids: list[str], title_hint: str = "") -> GenerateResult:
+    """song ID 목록을 받아 렌더링 완료 후 mp3를 다운로드.
+
+    request_songs / request_songs_simple 이 반환한 song_ids를 넘겨 사용.
+    create 페이지 피드에서 duration 표시를 감지해 완료를 확인한 뒤 다운로드.
+    저장 위치: 호출 시점 CWD/mp3/
+    """
+    if not song_ids:
+        raise SunoError("song_ids가 비어 있습니다.")
+
+    cwd = Path.cwd()
+    mp3_dir = cwd / "mp3"
+    mp3_dir.mkdir(parents=True, exist_ok=True)
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch_persistent_context(
+            user_data_dir=str(PROFILE_DIR),
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        page = browser.pages[0] if browser.pages else browser.new_page()
+        try:
+            if not _ensure_logged_in(page):
+                raise SunoError("Suno 로그인이 감지되지 않았습니다 (5분 대기 초과).")
+
+            # create 페이지 피드에서 렌더링 완료(duration 표시) 대기
+            page.goto(SUNO_CREATE_URL, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_timeout(2_000)
+
+            status = _wait_until_rendered(page, song_ids, timeout_sec=GENERATION_TIMEOUT_SEC)
+            details = status.get("details", {})
+
+            # CDN 안정화 대기
+            page.wait_for_timeout(15_000)
+
+            durations: dict[str, float] = {}
+            files: list[str] = []
+            used_names: set[str] = set()
+
+            for sid in song_ids:
+                info = details.get(sid, {})
+                dur_str = info.get("duration")
+                ui_title = info.get("title")
+                expected_sec = float(_parse_duration_str(dur_str)) if dur_str else 0.0
+                durations[sid] = expected_sec
+
+                filename = _resolve_filename(used_names, ui_title, title_hint, sid)
+                target = mp3_dir / filename
+
+                ok = _download_song(page, sid, str(target), expected_sec)
+                if ok and target.exists():
+                    rel_path = target.relative_to(cwd).as_posix()
+                    files.append(rel_path)
+
+            if not files:
+                raise SunoError(f"다운로드에 실패했습니다 (song_ids={song_ids}).")
+
+            return GenerateResult(files=files, song_ids=song_ids, durations=durations)
+        finally:
+            browser.close()
+
+
 # ---------- 엔트리포인트 ----------
 
 def generate_songs(lyrics: str, styles: str, title: str = "") -> GenerateResult:

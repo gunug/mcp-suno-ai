@@ -12,7 +12,15 @@ import asyncio
 
 from mcp.server.fastmcp import FastMCP
 
-from suno_automation import GenerateResult, SunoError, generate_songs, generate_songs_simple
+from suno_automation import (
+    GenerateResult,
+    SunoError,
+    generate_songs,
+    generate_songs_simple,
+    request_songs,
+    request_songs_simple,
+    download_songs_by_ids,
+)
 
 mcp = FastMCP("suno-ai")
 
@@ -82,6 +90,102 @@ async def create_song_simple(description: str, title: str = "", instrumental: bo
     try:
         result: GenerateResult = await asyncio.to_thread(
             generate_songs_simple, description, title, instrumental
+        )
+        return {
+            "status": "success",
+            "files": result.files,
+            "song_ids": result.song_ids,
+            "durations": result.durations,
+            "message": f"{len(result.files)}곡 다운로드 완료.",
+        }
+    except SunoError as e:
+        return {"status": "error", "message": str(e)}
+    except Exception as e:
+        return {"status": "error", "message": f"예상치 못한 오류: {e!r}"}
+
+
+@mcp.tool()
+async def request_song(lyrics: str, styles: str, title: str = "") -> dict:
+    """Suno AI Advanced 모드로 생성 요청만 하고 song ID를 즉시 반환 (다운로드 없음).
+
+    동작:
+    - 프롬프트 로그 기록 후 Advanced 모드로 폼 제출
+    - 곡 카드에 song ID가 나타나면 즉시 반환 (렌더링·다운로드 대기 없음)
+    - 반환된 song_ids는 download_songs 도구에 넘겨 나중에 다운로드 가능
+
+    Args:
+        lyrics: 가사 (필수)
+        styles: 음악 스타일 설명 (필수)
+        title: 곡 제목 (선택)
+
+    Returns:
+        성공 시 {"status": "success", "song_ids": [...]}
+        실패 시 {"status": "error", "message": "..."}
+    """
+    try:
+        song_ids = await asyncio.to_thread(request_songs, lyrics, styles, title)
+        return {
+            "status": "success",
+            "song_ids": song_ids,
+            "message": f"생성 요청 완료. song_ids={song_ids}",
+        }
+    except SunoError as e:
+        return {"status": "error", "message": str(e)}
+    except Exception as e:
+        return {"status": "error", "message": f"예상치 못한 오류: {e!r}"}
+
+
+@mcp.tool()
+async def request_song_simple(description: str, title: str = "", instrumental: bool = False) -> dict:
+    """Suno AI Simple 모드로 생성 요청만 하고 song ID를 즉시 반환 (다운로드 없음).
+
+    동작:
+    - 프롬프트 로그 기록 후 Simple 모드로 폼 제출
+    - 곡 카드에 song ID가 나타나면 즉시 반환 (렌더링·다운로드 대기 없음)
+    - 반환된 song_ids는 download_songs 도구에 넘겨 나중에 다운로드 가능
+
+    Args:
+        description: 원하는 곡의 분위기·장르·감정을 자연어로 설명 (필수)
+        title: 곡 제목 (선택)
+        instrumental: True이면 연주곡으로 생성 (기본값 False)
+
+    Returns:
+        성공 시 {"status": "success", "song_ids": [...]}
+        실패 시 {"status": "error", "message": "..."}
+    """
+    try:
+        song_ids = await asyncio.to_thread(request_songs_simple, description, title, instrumental)
+        return {
+            "status": "success",
+            "song_ids": song_ids,
+            "message": f"생성 요청 완료. song_ids={song_ids}",
+        }
+    except SunoError as e:
+        return {"status": "error", "message": str(e)}
+    except Exception as e:
+        return {"status": "error", "message": f"예상치 못한 오류: {e!r}"}
+
+
+@mcp.tool()
+async def download_songs(song_ids: list[str], title_hint: str = "") -> dict:
+    """song ID 목록을 받아 렌더링 완료 후 mp3를 다운로드.
+
+    동작:
+    - request_song / request_song_simple 이 반환한 song_ids를 입력으로 받음
+    - Suno create 페이지 피드에서 duration 표시를 감지해 렌더링 완료 확인 (최대 5분)
+    - 완료된 곡을 CWD/mp3/ 에 다운로드
+
+    Args:
+        song_ids: 다운로드할 song ID 목록 (request_song* 반환값)
+        title_hint: 파일명 fallback용 제목 힌트 (선택)
+
+    Returns:
+        성공 시 {"status": "success", "files": [...], "song_ids": [...], "durations": {...}}
+        실패 시 {"status": "error", "message": "..."}
+    """
+    try:
+        result: GenerateResult = await asyncio.to_thread(
+            download_songs_by_ids, song_ids, title_hint
         )
         return {
             "status": "success",
