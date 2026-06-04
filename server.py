@@ -21,6 +21,7 @@ from suno_automation import (
     request_songs_simple,
     download_songs_by_ids,
 )
+from suno_tuned import generate_songs_tuned
 
 mcp = FastMCP("suno-ai")
 
@@ -56,6 +57,52 @@ async def create_song(lyrics: str, styles: str, title: str = "") -> dict:
             "files": result.files,
             "song_ids": result.song_ids,
             "durations": result.durations,
+            "message": f"{len(result.files)}곡 다운로드 완료.",
+        }
+    except SunoError as e:
+        return {"status": "error", "message": str(e)}
+    except Exception as e:
+        return {"status": "error", "message": f"예상치 못한 오류: {e!r}"}
+
+
+@mcp.tool()
+async def create_song_tuned(
+    lyrics: str,
+    styles: str,
+    title: str = "",
+    weirdness: int | None = None,
+    style_influence: int | None = None,
+) -> dict:
+    """create_song 과 동일하되, Advanced > More Options 의 Weirdness / Style Influence
+    슬라이더를 지정 값으로 설정한 뒤 곡 2개를 생성·다운로드한다.
+
+    기존 create_song 은 그대로 두고 분리된 경로다. 슬라이더 외 동작(2곡 생성,
+    mp3 다운로드, prompt 로그)은 create_song 과 동일.
+
+    Args:
+        lyrics: 가사 (필수). 보컬 미요청 시 "[Instrumental]".
+        styles: 음악 스타일 설명 (필수).
+        title: 곡 제목 (선택).
+        weirdness: 0~100 정수. None(기본)이면 Suno 기본값 50% 유지.
+            높을수록 실험적·예측 불가한 결과.
+        style_influence: 0~100 정수. None(기본)이면 50% 유지.
+            높을수록 styles 설명을 더 강하게 반영.
+
+    Returns:
+        성공 시 {"status": "success", "files": [...], "song_ids": [...],
+                "durations": {...}, "applied": {weirdness, style_influence}}
+        실패 시 {"status": "error", "message": "..."}
+    """
+    try:
+        result: GenerateResult = await asyncio.to_thread(
+            generate_songs_tuned, lyrics, styles, title, weirdness, style_influence
+        )
+        return {
+            "status": "success",
+            "files": result.files,
+            "song_ids": result.song_ids,
+            "durations": result.durations,
+            "applied": {"weirdness": weirdness, "style_influence": style_influence},
             "message": f"{len(result.files)}곡 다운로드 완료.",
         }
     except SunoError as e:
