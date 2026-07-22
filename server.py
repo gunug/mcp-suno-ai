@@ -13,6 +13,7 @@ import asyncio
 from mcp.server.fastmcp import FastMCP
 
 from suno_automation import (
+    REQUIRED_CREDITS,
     GenerateResult,
     SunoError,
     generate_songs,
@@ -26,9 +27,25 @@ from suno_tuned import generate_songs_tuned
 mcp = FastMCP("suno-ai")
 
 
+def _credit_note(result: GenerateResult) -> str:
+    """성공 결과에 붙일 잔여 크레딧 안내/경고 문구 (판독 실패 시 빈 문자열)."""
+    if result.credits_after is None:
+        return ""
+    note = f" | 남은 크레딧 약 {result.credits_after}" \
+           f" (생성 {result.credits_after // REQUIRED_CREDITS}회분)"
+    if result.credits_after < REQUIRED_CREDITS:
+        note += " ⚠️ 다음 생성 불가 — 무료 크레딧 소진. 매일 리셋됨."
+    return note
+
+
 @mcp.tool()
 async def create_song(lyrics: str, styles: str, title: str = "") -> dict:
-    """Suno AI Advanced 모드로 곡 2개를 생성하고 mp3로 다운로드한다.
+    """[BUILD: me-detect-2026-06-09] 곡 감지 /me 기반 + 쿠키 자동수락 + 크레딧 사전점검 적용본.
+
+    (검증용 마커: 이 도구 설명에 위 BUILD 문자열이 보이면 = 실행 중 서버가 패치 코드를 로드함.
+     안 보이면 = 옛 코드 → MCP 서버/Claude Code 완전 재시작 필요.)
+
+    Suno AI Advanced 모드로 곡 2개를 생성하고 mp3로 다운로드한다.
 
     동작:
     - 호출 측 CWD/prompt/YYYYMMDD_HHMMSS_<title>.md 에 입력 프롬프트 기록
@@ -57,7 +74,9 @@ async def create_song(lyrics: str, styles: str, title: str = "") -> dict:
             "files": result.files,
             "song_ids": result.song_ids,
             "durations": result.durations,
-            "message": f"{len(result.files)}곡 다운로드 완료.",
+            "credits_before": result.credits_before,
+            "credits_after": result.credits_after,
+            "message": f"{len(result.files)}곡 다운로드 완료.{_credit_note(result)}",
         }
     except SunoError as e:
         return {"status": "error", "message": str(e)}
@@ -143,7 +162,9 @@ async def create_song_simple(description: str, title: str = "", instrumental: bo
             "files": result.files,
             "song_ids": result.song_ids,
             "durations": result.durations,
-            "message": f"{len(result.files)}곡 다운로드 완료.",
+            "credits_before": result.credits_before,
+            "credits_after": result.credits_after,
+            "message": f"{len(result.files)}곡 다운로드 완료.{_credit_note(result)}",
         }
     except SunoError as e:
         return {"status": "error", "message": str(e)}

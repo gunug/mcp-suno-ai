@@ -20,14 +20,19 @@ from pathlib import Path
 from mutagen.mp3 import MP3
 from playwright.sync_api import sync_playwright, Page
 
+# 패치 빌드 식별자 — 소스/런타임 검증용. /me 기반 곡 감지 + 쿠키 자동수락 + 크레딧 사전점검.
+BUILD = "me-detect-2026-06-09"
+
 BASE_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = BASE_DIR / "chrome_suno_profile"
 # MP3 저장 디렉터리는 호출 시점 CWD 기준 — generate_songs() 안에서 동적으로 계산
 SUNO_CREATE_URL = "https://suno.com/create"
 SUNO_HOME_URL = "https://suno.com"
+SUNO_ME_URL = "https://suno.com/me"
 
 LOGIN_WAIT_TIMEOUT_MS = 300_000  # 5분
 GENERATION_TIMEOUT_SEC = 300     # 5분 (전체 대기)
+REQUIRED_CREDITS = 10            # create_song(2곡) 1회 소비량 (무료 v4.5 관측치: 30→20→10)
 
 
 class SunoError(Exception):
@@ -39,6 +44,8 @@ class GenerateResult:
     files: list[str] = field(default_factory=list)
     song_ids: list[str] = field(default_factory=list)
     durations: dict[str, float] = field(default_factory=dict)
+    credits_before: int | None = None  # 생성 직전 잔여 크레딧 (판독 실패 시 None)
+    credits_after: int | None = None   # 생성 후 잔여 추정 (credits_before - REQUIRED_CREDITS)
 
 
 # ---------- 유틸 ----------
@@ -149,9 +156,68 @@ def _paste_into(page: Page, element, text: str) -> None:
         page.wait_for_timeout(300)
 
 
-def _fill_form_and_submit(page: Page, lyrics: str, styles: str, title: str) -> None:
+def _dismiss_cookie_banner(page: Page) -> None:
+    """OneTrust 쿠키 동의 배너를 수락해 닫는다.
+
+    무료 계정/새 프로필 상태에서는 'Accept All Cookies' 배너가 페이지 하단에 떠
+    Create 버튼(생성 패널 하단) 클릭을 가로채 생성이 시작되지 않는다. (Pro 프로필은
+    과거에 쿠키를 수락해둬 배너가 없었음.) 배너가 있으면 수락 버튼을 눌러 제거한다.
+    """
+    for sel in (
+        "#onetrust-accept-btn-handler",
+        'button:has-text("Accept All Cookies")',
+        'button:has-text("Accept All")',
+        "#onetrust-banner-sdk button",
+    ):
+        try:
+            btn = page.query_selector(sel)
+            if btn and btn.is_visible():
+                btn.click()
+                page.wait_for_timeout(800)
+                return
+        except Exception:
+            pass
+
+
+def _read_credits(page: Page) -> int | None:
+    """상단바의 남은 크레딧 수를 읽는다. 패턴 미발견/오류 시 None (안전: 차단 안 함)."""
+    try:
+        return page.evaluate(
+            r"""
+            () => {
+              const body = document.body.innerText || '';
+              const m = body.match(/([\d,]+)\s*Credits/i);
+              return m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
+            }
+            """
+        )
+    except Exception:
+        return None
+
+
+def _ensure_enough_credits(page: Page) -> int | None:
+    """남은 크레딧이 부족하면 SunoError 로 즉시 차단(낭비 방지). 판독 불가면 통과.
+
+    Returns: 읽은 크레딧 수 (None 이면 판독 실패).
+    """
+    credits = _read_credits(page)
+    if credits is not None and credits < REQUIRED_CREDITS:
+        raise SunoError(
+            f"Suno 크레딧 부족: 현재 {credits} 크레딧 (생성 1회에 약 {REQUIRED_CREDITS} 필요). "
+            f"무료 크레딧은 매일 리셋됩니다 — 내일 다시 시도하거나 Suno 구독/충전이 필요합니다."
+        )
+    return credits
+
+
+def _fill_form_and_submit(page: Page, lyrics: str, styles: str, title: str) -> int | None:
     page.goto(SUNO_CREATE_URL, wait_until="domcontentloaded", timeout=60_000)
     page.wait_for_timeout(2_000)
+
+    # 쿠키 동의 배너 수락 (Create 버튼 클릭 가로채기 방지)
+    _dismiss_cookie_banner(page)
+
+    # 크레딧 사전 점검 — 부족하면 폼 입력 전에 명확한 메시지로 즉시 중단
+    credits_before = _ensure_enough_credits(page)
 
     # 오버레이 닫기
     if page.query_selector('div[class*="overlay"], div[class*="modal"]'):
@@ -207,8 +273,11 @@ def _fill_form_and_submit(page: Page, lyrics: str, styles: str, title: str) -> N
     if not create_btn:
         raise SunoError("Create 버튼을 찾지 못했습니다.")
     if create_btn.is_disabled():
-        raise SunoError("Create 버튼이 비활성 상태입니다. 입력값을 확인하세요.")
+        raise SunoError(
+            "Create 버튼이 비활성 상태입니다. 입력값 또는 크레딧 잔액을 확인하세요."
+        )
     create_btn.click()
+    return credits_before
 
 
 # ---------- 생성 완료 대기 ----------
@@ -236,6 +305,88 @@ def _wait_new_song_ids(page: Page, before: set[str], timeout_sec: int) -> list[s
         if len(new_ids) >= 2:
             return new_ids
     return new_ids
+
+
+# ---------- /me 페이지 기반 곡 감지 (현재 Suno UI) ----------
+# 현재 Suno UI 에서 create 페이지 워크스페이스에는 생성된 곡이 a[href*="/song/"] 로
+# 노출되지 않는다(워크스페이스가 /studio 로 이동). 생성된 곡은 /me 페이지에
+# /song/<uuid> 링크로 나타나므로, 새 곡 감지/렌더대기는 /me 에서 수행한다.
+
+def _collect_me_songs(page: Page) -> list[dict]:
+    """현재 /me 페이지의 곡 목록을 (id, title, dur, spin) 순서대로 수집 (최신순)."""
+    return page.evaluate(
+        r"""
+        () => {
+          const idRe = /\/song\/([0-9a-f-]{36})/i;
+          const out = []; const seen = new Set();
+          for (const a of document.querySelectorAll('a[href*="/song/"]')) {
+            const m = (a.getAttribute('href')||'').match(idRe);
+            if (!m) continue;
+            const id = m[1];
+            if (seen.has(id)) continue; seen.add(id);
+            let card = a;
+            for (let i=0;i<6 && card.parentElement;i++) card = card.parentElement;
+            const text = (card.innerText||'').replace(/\s+/g,' ').trim();
+            const dur = (text.match(/\b(\d{1,2}:\d{2})\b/)||[])[1] || null;
+            const spin = !!card.querySelector('.animate-spin');
+            const title = (a.innerText||'').trim() || null;
+            out.push({id, title, dur, spin});
+          }
+          return out.slice(0, 40);
+        }
+        """
+    )
+
+
+def _goto_me(page: Page) -> None:
+    page.goto(SUNO_ME_URL, wait_until="domcontentloaded", timeout=60_000)
+    page.wait_for_timeout(3_000)
+    _dismiss_cookie_banner(page)
+    page.wait_for_timeout(1_500)
+
+
+def _me_ids(page: Page) -> set[str]:
+    """제출 전 /me 의 기존 song id 집합 (새 곡 식별 기준선)."""
+    _goto_me(page)
+    return {s["id"] for s in _collect_me_songs(page)}
+
+
+def _wait_new_on_me(page: Page, before: set[str], timeout_sec: int) -> list[str]:
+    """submit 후 /me 를 새로고침하며 before 에 없는 새 song id 2개를 기다린다."""
+    start = time.time()
+    new_ids: list[str] = []
+    while time.time() - start < timeout_sec:
+        _goto_me(page)
+        new_ids = [s["id"] for s in _collect_me_songs(page) if s["id"] not in before]
+        if len(new_ids) >= 2:
+            return new_ids[:2]
+        page.wait_for_timeout(6_000)
+    return new_ids[:2]
+
+
+def _wait_rendered_on_me(page: Page, ids: list[str], timeout_sec: int) -> dict:
+    """ids 가 /me 에서 duration 표시 & spinner 없음(렌더 완료)이 될 때까지 대기.
+
+    Returns: {id: {"duration": "m:ss"|None, "title": str|None}}
+    """
+    start = time.time()
+    details: dict = {sid: {"duration": None, "title": None} for sid in ids}
+    while time.time() - start < timeout_sec:
+        _goto_me(page)
+        songs = {s["id"]: s for s in _collect_me_songs(page)}
+        all_done = True
+        for sid in ids:
+            s = songs.get(sid)
+            if not s:
+                all_done = False
+                continue
+            details[sid] = {"duration": s.get("dur"), "title": s.get("title")}
+            if not s.get("dur") or s.get("spin"):
+                all_done = False
+        if all_done:
+            return details
+        page.wait_for_timeout(6_000)
+    return details
 
 
 def _check_completed(page: Page, song_ids: list[str]):
@@ -409,9 +560,15 @@ def _first_visible(page: Page, selectors: list[str]):
     return None
 
 
-def _fill_form_simple_and_submit(page: Page, description: str, title: str, instrumental: bool) -> None:
+def _fill_form_simple_and_submit(page: Page, description: str, title: str, instrumental: bool) -> int | None:
     page.goto(SUNO_CREATE_URL, wait_until="domcontentloaded", timeout=60_000)
     page.wait_for_timeout(2_000)
+
+    # 쿠키 동의 배너 수락 (Create 버튼 클릭 가로채기 방지)
+    _dismiss_cookie_banner(page)
+
+    # 크레딧 사전 점검 — 부족하면 폼 입력 전에 즉시 중단
+    credits_before = _ensure_enough_credits(page)
 
     # 오버레이 닫기
     overlay = page.query_selector('div[class*="overlay"], div[class*="modal"]')
@@ -489,8 +646,11 @@ def _fill_form_simple_and_submit(page: Page, description: str, title: str, instr
     if not create_btn:
         raise SunoError("Create 버튼을 찾지 못했습니다.")
     if create_btn.is_disabled():
-        raise SunoError("Create 버튼이 비활성 상태입니다. 입력값을 확인하세요.")
+        raise SunoError(
+            "Create 버튼이 비활성 상태입니다. 입력값 또는 크레딧 잔액을 확인하세요."
+        )
     create_btn.click()
+    return credits_before
 
 
 # ---------- 생성-only / 다운로드-only 분리 엔트리포인트 ----------
@@ -522,16 +682,14 @@ def request_songs(lyrics: str, styles: str, title: str = "") -> list[str]:
             if not _ensure_logged_in(page):
                 raise SunoError("Suno 로그인이 감지되지 않았습니다 (5분 대기 초과).")
 
-            before = _existing_song_ids(page) if page.url.startswith("https://suno.com") else set()
-            page.goto(SUNO_CREATE_URL, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_timeout(2_000)
-            before |= _existing_song_ids(page)
+            before = _me_ids(page)
 
             _fill_form_and_submit(page, lyrics, styles, title)
+            page.wait_for_timeout(4_000)
 
-            new_ids = _wait_new_song_ids(page, before, timeout_sec=90)
+            new_ids = _wait_new_on_me(page, before, timeout_sec=180)
             if not new_ids:
-                raise SunoError("새로 생성된 곡 ID가 감지되지 않았습니다.")
+                raise SunoError("새로 생성된 곡 ID가 감지되지 않았습니다 (/me).")
             return new_ids[:2]
         finally:
             browser.close()
@@ -561,16 +719,14 @@ def request_songs_simple(description: str, title: str = "", instrumental: bool =
             if not _ensure_logged_in(page):
                 raise SunoError("Suno 로그인이 감지되지 않았습니다 (5분 대기 초과).")
 
-            before = _existing_song_ids(page) if page.url.startswith("https://suno.com") else set()
-            page.goto(SUNO_CREATE_URL, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_timeout(2_000)
-            before |= _existing_song_ids(page)
+            before = _me_ids(page)
 
             _fill_form_simple_and_submit(page, description, title, instrumental)
+            page.wait_for_timeout(4_000)
 
-            new_ids = _wait_new_song_ids(page, before, timeout_sec=90)
+            new_ids = _wait_new_on_me(page, before, timeout_sec=180)
             if not new_ids:
-                raise SunoError("새로 생성된 곡 ID가 감지되지 않았습니다.")
+                raise SunoError("새로 생성된 곡 ID가 감지되지 않았습니다 (/me).")
             return new_ids[:2]
         finally:
             browser.close()
@@ -602,12 +758,8 @@ def download_songs_by_ids(song_ids: list[str], title_hint: str = "") -> Generate
             if not _ensure_logged_in(page):
                 raise SunoError("Suno 로그인이 감지되지 않았습니다 (5분 대기 초과).")
 
-            # create 페이지 피드에서 렌더링 완료(duration 표시) 대기
-            page.goto(SUNO_CREATE_URL, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_timeout(2_000)
-
-            status = _wait_until_rendered(page, song_ids, timeout_sec=GENERATION_TIMEOUT_SEC)
-            details = status.get("details", {})
+            # /me 에서 렌더링 완료(duration 표시 & spinner 없음) 대기
+            details = _wait_rendered_on_me(page, song_ids, timeout_sec=GENERATION_TIMEOUT_SEC)
 
             # CDN 안정화 대기
             page.wait_for_timeout(15_000)
@@ -673,24 +825,21 @@ def generate_songs(lyrics: str, styles: str, title: str = "") -> GenerateResult:
             if not _ensure_logged_in(page):
                 raise SunoError("Suno 로그인이 감지되지 않았습니다 (5분 대기 초과).")
 
-            before = _existing_song_ids(page) if page.url.startswith("https://suno.com") else set()
-            page.goto(SUNO_CREATE_URL, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_timeout(2_000)
-            before |= _existing_song_ids(page)
+            # 제출 전 /me 의 기존 곡 id 집합 (새 곡 식별 기준선)
+            before = _me_ids(page)
 
-            _fill_form_and_submit(page, lyrics, styles, title)
+            credits_before = _fill_form_and_submit(page, lyrics, styles, title)
+            page.wait_for_timeout(4_000)  # 생성 요청 전송 안정화
 
-            # Phase 1: 새 song ID 출현 (최대 90초)
-            new_ids = _wait_new_song_ids(page, before, timeout_sec=90)
+            # Phase 1: /me 에서 새 song ID 출현 (최대 180초)
+            #   현재 Suno UI 는 create 페이지에 곡을 노출하지 않으므로 /me 에서 감지한다.
+            new_ids = _wait_new_on_me(page, before, timeout_sec=180)
             if not new_ids:
-                raise SunoError("새로 생성된 곡 ID가 감지되지 않았습니다.")
-
-            # 새 곡은 보통 2개; 더 많거나 적게 잡혀도 그대로 진행
+                raise SunoError("새로 생성된 곡 ID가 감지되지 않았습니다 (/me).")
             new_ids = new_ids[:2]
 
-            # Phase 2: UI 렌더링 완료 대기 (duration 표시 & spinner 없음)
-            status = _wait_until_rendered(page, new_ids, timeout_sec=GENERATION_TIMEOUT_SEC)
-            details = status.get("details", {})
+            # Phase 2: /me 에서 렌더링 완료 대기 (duration 표시 & spinner 없음)
+            details = _wait_rendered_on_me(page, new_ids, timeout_sec=GENERATION_TIMEOUT_SEC)
 
             # CDN 안정화 대기
             page.wait_for_timeout(15_000)
@@ -719,7 +868,12 @@ def generate_songs(lyrics: str, styles: str, title: str = "") -> GenerateResult:
                     f"곡 생성은 감지되었으나 다운로드에 실패했습니다 (song_ids={new_ids})."
                 )
 
-            return GenerateResult(files=files, song_ids=new_ids, durations=durations)
+            return GenerateResult(
+                files=files, song_ids=new_ids, durations=durations,
+                credits_before=credits_before,
+                credits_after=(credits_before - REQUIRED_CREDITS)
+                if credits_before is not None else None,
+            )
         finally:
             browser.close()
 
@@ -754,23 +908,20 @@ def generate_songs_simple(description: str, title: str = "", instrumental: bool 
             if not _ensure_logged_in(page):
                 raise SunoError("Suno 로그인이 감지되지 않았습니다 (5분 대기 초과).")
 
-            before = _existing_song_ids(page) if page.url.startswith("https://suno.com") else set()
-            page.goto(SUNO_CREATE_URL, wait_until="domcontentloaded", timeout=60_000)
-            page.wait_for_timeout(2_000)
-            before |= _existing_song_ids(page)
+            # 제출 전 /me 의 기존 곡 id 집합 (새 곡 식별 기준선)
+            before = _me_ids(page)
 
-            _fill_form_simple_and_submit(page, description, title, instrumental)
+            credits_before = _fill_form_simple_and_submit(page, description, title, instrumental)
+            page.wait_for_timeout(4_000)  # 생성 요청 전송 안정화
 
-            # Phase 1: 새 song ID 출현 (최대 90초)
-            new_ids = _wait_new_song_ids(page, before, timeout_sec=90)
+            # Phase 1: /me 에서 새 song ID 출현 (최대 180초)
+            new_ids = _wait_new_on_me(page, before, timeout_sec=180)
             if not new_ids:
-                raise SunoError("새로 생성된 곡 ID가 감지되지 않았습니다.")
-
+                raise SunoError("새로 생성된 곡 ID가 감지되지 않았습니다 (/me).")
             new_ids = new_ids[:2]
 
-            # Phase 2: UI 렌더링 완료 대기 (duration 표시 & spinner 없음)
-            status = _wait_until_rendered(page, new_ids, timeout_sec=GENERATION_TIMEOUT_SEC)
-            details = status.get("details", {})
+            # Phase 2: /me 에서 렌더링 완료 대기 (duration 표시 & spinner 없음)
+            details = _wait_rendered_on_me(page, new_ids, timeout_sec=GENERATION_TIMEOUT_SEC)
 
             # CDN 안정화 대기
             page.wait_for_timeout(15_000)
@@ -799,6 +950,11 @@ def generate_songs_simple(description: str, title: str = "", instrumental: bool 
                     f"곡 생성은 감지되었으나 다운로드에 실패했습니다 (song_ids={new_ids})."
                 )
 
-            return GenerateResult(files=files, song_ids=new_ids, durations=durations)
+            return GenerateResult(
+                files=files, song_ids=new_ids, durations=durations,
+                credits_before=credits_before,
+                credits_after=(credits_before - REQUIRED_CREDITS)
+                if credits_before is not None else None,
+            )
         finally:
             browser.close()
